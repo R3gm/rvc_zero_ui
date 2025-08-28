@@ -66,6 +66,7 @@ for url, filename in zip(test_model.split(", "), test_names):
 
 title = "<center><strong><font size='7'>RVC⚡ZERO</font></strong></center>"
 description = "This demo is provided for educational and research purposes only. The authors and contributors of this project do not endorse or encourage any misuse or unethical use of this software. Any use of this software for purposes other than those intended is solely at the user's own risk. The authors and contributors shall not be held responsible for any damages or liabilities arising from the use of this demo inappropriately." if IS_ZERO_GPU else ""
+RESOURCES = "- You can also try `RVC⚡ZERO` in Colab’s free tier, which provides free GPU [link](https://github.com/R3gm/rvc_zero_ui?tab=readme-ov-file#rvczero)."
 theme = args.theme
 delete_cache_time = (3200, 3200) if IS_ZERO_GPU else (86400, 86400)
 
@@ -828,6 +829,7 @@ def get_gui(theme):
             outputs=[output_base],
             cache_examples=False,
         )
+        gr.Markdown(RESOURCES)
 
     return app
 

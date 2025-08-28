@@ -18,6 +18,7 @@ short_description: Voice conversion framework based on VITS
 
 | Description         | Link |
 |---------------------|------|
+| 📙 Colab Notebook | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/R3gm/rvc_zero_ui/blob/main/colab_notebook.ipynb) |
 | 🎉 Repository       | [![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-black?style=flat-square&logo=github)](https://github.com/R3gm/rvc_zero_ui) |
 | 🚀 Online DEMO      | [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/r3gm/rvc_zero) |
 
