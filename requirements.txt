@@ -1,6 +1,6 @@
 torch==2.5.1
 infer-rvc-python
-edge-tts
+edge_tts==7.2.1
 pedalboard
 noisereduce
 numpy==1.23.5
@@ -8,4 +8,5 @@ transformers<=4.48.3
 pydantic==2.10.6
 gradio==5.43.1
 spaces
+
 matplotlib-inline
