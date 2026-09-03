@@ -11,3 +11,4 @@ transformers==5.16.1
 gradio==6.26.0
 spaces==0.51.3
 matplotlib-inline
+picklescan
