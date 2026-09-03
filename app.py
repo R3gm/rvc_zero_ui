@@ -982,7 +982,7 @@ def steps_conf():
     return gr.Slider(
         minimum=1,
         maximum=3,
-        label="Conversion Cycles",
+        label="Sub-conversion Cycles",
         value=1,
         step=1,
         interactive=True,
@@ -1246,7 +1246,7 @@ def get_gui(theme):
                         down_button_gui = down_button_conf()
                     with gr.Tab("🔍 Search Community", id="tab_model_search") as tab_mod_search:
                         with gr.Row():
-                            search_query = gr.Textbox(label="Search Query", placeholder="Character or model name...", scale=3, lines=1)
+                            search_query = gr.Textbox(label="Search Query", placeholder="Hatsune Miku", scale=3, lines=1)
                             search_btn = gr.Button("🔍 Search", variant="primary", scale=1)
                         search_results = gr.Dropdown(label="Search Results", choices=[], interactive=True)
                         model_info_md = gr.Markdown(value="*Select a model from the dropdown to view details.*")
