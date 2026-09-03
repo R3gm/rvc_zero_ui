@@ -54,16 +54,23 @@ parser.add_argument(
 parser.add_argument(
     '--theme',
     type=str,
-    default="aliabid94/new-theme",
-    help='Set the theme (default: aliabid94/new-theme)'
+    default="default_theme",
+    help='Set the theme (default: default_theme)'
 )
 args = parser.parse_args()
 
 IS_COLAB = True if ('google.colab' in sys.modules or args.share) else False
 IS_ZERO_GPU = os.getenv("SPACES_ZERO_GPU")
 
+if args.theme == "default_theme":
+    selected_theme = gr.themes.Monochrome()
+    IS_R3_THEME = True
+else:
+    selected_theme = args.theme
+    IS_R3_THEME = False
+
 disable_progress_bars()
-logging.getLogger("infer_rvc_python").setLevel(logging.INFO)
+logging.getLogger("infer_rvc_python").setLevel(logging.WARNING)
 
 rmvpe_path = hf_hub_download(
     repo_id="r3gm/sonitranslate_voice_models",
@@ -145,7 +152,6 @@ INFO_EXAMPLES = f"""
 </span>
 """
 RESOURCES = "- You can also try `RVC⚡ZERO` in Colab’s free tier, which provides free GPU [link](https://github.com/R3gm/rvc_zero_ui?tab=readme-ov-file#rvczero)."
-theme = args.theme
 DELETE_CACHE_TIME = (3200, 3200) if IS_ZERO_GPU else (86400, 86400)
 
 PITCH_ALGO_OPT = [
@@ -610,7 +616,7 @@ def ensure_valid_file(url):
 
 def clear_files(directory):
     time.sleep(15)
-    print(f"Clearing files: {directory}.")
+    # print(f"Clearing files: {directory}.")
     shutil.rmtree(directory)
 
 
@@ -818,11 +824,11 @@ def run(
     if isinstance(audio_files, str):
         audio_files = [audio_files]
 
-    try:
-        duration_base = librosa.get_duration(filename=audio_files[0])
-        print("Duration:", duration_base)
-    except Exception as e:
-        print(e)
+    # try:
+    #     duration_base = librosa.get_duration(filename=audio_files[0])
+    #     print("Duration:", duration_base)
+    # except Exception as e:
+    #     print(e)
 
     if file_m is not None and (file_m.endswith(".txt") or file_m.endswith(".zip")):
         file_m, file_index = find_my_model(file_m, file_index)
@@ -1024,9 +1030,9 @@ def player_conf():
 
 def button_conf():
     return gr.Button(
-        "🚀 Inference",
+        "⚡ Inference",
         variant="primary",
-        size="lg",
+        elem_classes=["generate-btn"],
     )
 
 
@@ -1195,7 +1201,7 @@ def parse_rvc_settings_file(file_obj):
 
 
 # CSS rules to hide element visually while keeping DOM node accessible
-CSS = """
+BASE_CSS = """
 #download_settings_json_hidden {
     position: absolute !important;
     opacity: 0 !important;
@@ -1209,12 +1215,142 @@ CSS = """
 }
 """
 
+R3_THEME_CSS = """
+button.generate-btn {
+    width: 100% !important;
+    background-color: #111111 !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 4px !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: background-color 0.15s ease !important;
+    display: inline-flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    gap: 0.5rem !important;
+    box-shadow: none !important;
+}
+button.generate-btn:hover {
+    background-color: #222222 !important;
+}
+.dark button.generate-btn {
+    background-color: #ffffff !important;
+    color: #111111 !important;
+}
+.dark button.generate-btn:hover {
+    background-color: #e5e5e5 !important;
+}
+@media (prefers-color-scheme: dark) {
+    body:not(.light) button.generate-btn {
+        background-color: #ffffff !important;
+        color: #111111 !important;
+    }
+    body:not(.light) button.generate-btn:hover {
+        background-color: #e5e5e5 !important;
+    }
+}
+.compact-btn-row {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 0.5rem !important;
+    flex-wrap: wrap !important;
+    margin-top: 0.5rem !important;
+}
+.compact-btn,
+.compact-btn button,
+.gradio-container button.secondary {
+    width: auto !important;
+    min-width: unset !important;
+    max-width: fit-content !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 6px 12px !important;
+    min-height: 32px !important;
+    height: auto !important;
+    line-height: 1.2 !important;
+    text-align: center !important;
+    white-space: normal !important;
+    font-size: 0.813rem !important;
+    font-weight: 500 !important;
+    border-radius: 4px !important;
+    background-color: #111111 !important;
+    border: none !important;
+    color: #ffffff !important;
+    cursor: pointer !important;
+    transition: all 0.15s ease !important;
+    box-shadow: none !important;
+}
+.compact-btn:hover,
+.compact-btn button:hover,
+.gradio-container button.secondary:hover {
+    background-color: #222222 !important;
+}
+.dark .compact-btn,
+.dark .compact-btn button,
+.dark .gradio-container button.secondary {
+    background-color: #ffffff !important;
+    border: none !important;
+    color: #111111 !important;
+}
+.dark .compact-btn:hover,
+.dark .compact-btn button:hover,
+.dark .gradio-container button.secondary:hover {
+    background-color: #e5e5e5 !important;
+}
+@media (prefers-color-scheme: dark) {
+    body:not(.light) .compact-btn,
+    body:not(.light) .compact-btn button,
+    body:not(.light) .gradio-container button.secondary {
+        background-color: #ffffff !important;
+        border: none !important;
+        color: #111111 !important;
+    }
+    body:not(.light) .compact-btn:hover,
+    body:not(.light) .compact-btn button:hover,
+    body:not(.light) .gradio-container button.secondary:hover {
+        background-color: #e5e5e5 !important;
+    }
+}
+:root {
+    --component-border-color: var(--neutral-200, rgba(128, 128, 128, 0.18));
+    --component-bg-color: var(--neutral-50, rgba(128, 128, 128, 0.03));
+}
+.dark {
+    --component-border-color: var(--neutral-800, rgba(255, 255, 255, 0.12));
+    --component-bg-color: var(--neutral-900, rgba(255, 255, 255, 0.03));
+}
+.gradio-container .block,
+.gradio-container .panel,
+.gradio-container .form,
+.gradio-container fieldset {
+    border: 1px solid var(--component-border-color) !important;
+    background-color: var(--component-bg-color) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+.gradio-container .markdown,
+.gradio-container .prose,
+.gradio-container .block.prose,
+.gradio-container div[class*="markdown"] {
+    border: none !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+"""
+
+APP_CSS = (BASE_CSS + R3_THEME_CSS) if IS_R3_THEME else BASE_CSS
+
 supported_extensions = get_supported_audio_video_extensions()
 print("Supported extensions found:", supported_extensions)
 
 
-def get_gui(theme):
-    with gr.Blocks(theme=theme, fill_width=True, fill_height=False, delete_cache=DELETE_CACHE_TIME) as app:
+def get_gui():
+    with gr.Blocks(fill_width=True, fill_height=False, delete_cache=DELETE_CACHE_TIME) as app:
         gr.Markdown(TITLE)
         gr.Markdown(DESCRIPTION)
 
@@ -1247,7 +1383,7 @@ def get_gui(theme):
                     with gr.Tab("🔍 Search Community", id="tab_model_search") as tab_mod_search:
                         with gr.Row():
                             search_query = gr.Textbox(label="Search Query", placeholder="Hatsune Miku", scale=3, lines=1)
-                            search_btn = gr.Button("🔍 Search", variant="primary", scale=1)
+                            search_btn = gr.Button("🔍 Search", variant="secondary", scale=1)
                         search_results = gr.Dropdown(label="Search Results", choices=[], interactive=True)
                         model_info_md = gr.Markdown(value="*Select a model from the dropdown to view details.*")
                         search_down_btn = gr.Button("⬇️ Download & Load Model", variant="secondary")
@@ -1259,16 +1395,18 @@ def get_gui(theme):
             # Right Column: Settings, Actions & Outputs
             with gr.Column(scale=1):
                 with gr.Accordion(label="Advanced settings", open=False):
-                    with gr.Row():
+                    with gr.Row(elem_classes=["compact-btn-row"]):
                         load_settings_btn = gr.UploadButton(
                             "📂 Load Settings (JSON)",
                             file_types=[".json"],
                             file_count="single",
                             size="sm",
+                            elem_classes=["compact-btn"],
                         )
                         download_json_btn = gr.Button(
-                            "💾 Save Settings JSON",
+                            "💾 Download Settings JSON",
                             size="sm",
+                            elem_classes=["compact-btn"],
                         )
                         # Keep DOM node alive and hide with CSS
                         download_json_hidden = gr.DownloadButton(
@@ -1541,16 +1679,17 @@ if __name__ == "__main__":
         print(f"Warning: Could not retrieve online voices ({e}). Using default preset.")
         voices = [("English (United States) - EmmaMultilingual (Female)", "en-US-EmmaMultilingualNeural-Female")]
     
-    app = get_gui(theme)
+    app = get_gui()
 
     app.queue(default_concurrency_limit=40)
 
     app.launch(
+        theme=selected_theme,
+        css=APP_CSS,
         max_threads=40,
         share=IS_COLAB,
         show_error=True,
         quiet=False,
         debug=IS_COLAB,
         ssr_mode=False,
-        css=CSS,
     )
