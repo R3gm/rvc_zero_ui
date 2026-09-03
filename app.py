@@ -1,4 +1,5 @@
 import os
+import subprocess
 import gradio as gr
 import spaces
 from infer_rvc_python import BaseLoader
@@ -6,7 +7,8 @@ import random
 import logging
 import time
 import soundfile as sf
-from infer_rvc_python.main import download_manager, load_hu_bert, Config
+from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import disable_progress_bars
 import zipfile
 import edge_tts
 import asyncio
@@ -19,10 +21,29 @@ from pydub import AudioSegment
 import noisereduce as nr
 import numpy as np
 import urllib.request
+import urllib.parse
+import urllib.error
 import shutil
 import threading
 import argparse
 import sys
+import torch
+from picklescan.scanner import scan_file_path
+import hashlib
+import json
+import uuid
+import tempfile
+import sqlite3
+import pandas as pd
+import unicodedata
+import re
+import ast
+from huggingface_hub import HfApi
+
+ALLOWED_DOMAINS = {"huggingface.co", "hf.co"}
+MODEL_CACHE = {}
+URL_CACHE = {}
+LIKES_CACHE = {}
 
 parser = argparse.ArgumentParser(description="Run the app with optional sharing")
 parser.add_argument(
@@ -41,34 +62,91 @@ args = parser.parse_args()
 IS_COLAB = True if ('google.colab' in sys.modules or args.share) else False
 IS_ZERO_GPU = os.getenv("SPACES_ZERO_GPU")
 
-logging.getLogger("infer_rvc_python").setLevel(logging.ERROR)
+disable_progress_bars()
+logging.getLogger("infer_rvc_python").setLevel(logging.INFO)
 
-converter = BaseLoader(only_cpu=False, hubert_path=None, rmvpe_path=None)
-converter.hu_bert_model = load_hu_bert(Config(only_cpu=False), converter.hubert_path)
+rmvpe_path = hf_hub_download(
+    repo_id="r3gm/sonitranslate_voice_models",
+    filename="rmvpe.pt",
+)
+converter = BaseLoader(only_cpu=False, hubert_path="r3gm/hubert_base", rmvpe_path=rmvpe_path, preload_models=True)
 
-test_model = "https://huggingface.co/sail-rvc/Aldeano_Minecraft__RVC_V2_-_500_Epochs_/resolve/main/model.pth?download=true, https://huggingface.co/sail-rvc/Aldeano_Minecraft__RVC_V2_-_500_Epochs_/resolve/main/model.index?download=true"
+
+def parse_hf_url(url: str):
+    url = urllib.parse.unquote(url)
+    url = url.split("?")[0].strip()
+    url = url.replace("https://huggingface.co/", "").replace("https://hf.co/", "")
+    
+    parts = url.split("/")
+    repo_id = f"{parts[0]}/{parts[1]}"
+    
+    if len(parts) >= 5 and parts[2] in ["resolve", "blob"]:
+        revision = parts[3]
+        filename = "/".join(parts[4:])
+    else:
+        revision = "main"
+        filename = "/".join(parts[2:])
+        
+    return repo_id, filename, revision
+
+
+def hf_download_file(url: str, directory: str):
+    repo_id, filename, revision = parse_hf_url(url)
+    repo_id, filename, revision = parse_hf_url(url)
+    
+    downloaded_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        revision=revision,
+        local_dir=directory,
+        local_dir_use_symlinks=False
+    )
+    
+    base_filename = os.path.basename(filename)
+    target_path = os.path.join(directory, base_filename)
+    
+    if os.path.abspath(downloaded_path) != os.path.abspath(target_path):
+        subfolder_dir = os.path.dirname(downloaded_path)
+        shutil.move(downloaded_path, target_path)
+        
+        # Remove empty subfolder(s) left behind
+        try:
+            os.removedirs(subfolder_dir)
+        except OSError:
+            pass
+
+    return target_path
+
+
+test_model_urls = [
+    "https://huggingface.co/r3gm/villager/resolve/main/model.pth",
+    "https://huggingface.co/r3gm/villager/resolve/main/model.index"
+]
 test_names = ["model.pth", "model.index"]
 
-for url, filename in zip(test_model.split(", "), test_names):
+for url, filename in zip(test_model_urls, test_names):
+    if os.path.exists(filename):
+        continue
     try:
-        download_manager(
-            url=url,
-            path=".",
-            extension="",
-            overwrite=False,
-            progress=True,
-        )
+        hf_download_file(url, directory=".")
         if not os.path.isfile(filename):
             raise FileNotFoundError
     except Exception:
         with open(filename, "wb") as f:
             pass
 
-title = "<center><strong><font size='7'>RVC⚡ZERO</font></strong></center>"
-description = "This demo is provided for educational and research purposes only. The authors and contributors of this project do not endorse or encourage any misuse or unethical use of this software. Any use of this software for purposes other than those intended is solely at the user's own risk. The authors and contributors shall not be held responsible for any damages or liabilities arising from the use of this demo inappropriately." if IS_ZERO_GPU else ""
+TITLE = "<center><strong><font size='7'>RVC⚡ZERO</font></strong></center>"
+DESCRIPTION = "This demo is provided for educational and research purposes only. The authors and contributors of this project do not endorse or encourage any misuse or unethical use of this software. Any use of this software for purposes other than those intended is solely at the user's own risk. The authors and contributors shall not be held responsible for any damages or liabilities arising from the use of this demo inappropriately." if IS_ZERO_GPU else ""
+TEST_MODEL = ", ".join(test_model_urls)
+ZIP_EXAMPLE = "https://huggingface.co/MrDawg/ToothBrushing/resolve/main/ToothBrushing.zip?download=true"
+INFO_EXAMPLES = f"""
+<span style="font-size: 0.70rem; color: var(--body-text-color-subdued, #6b7280); display: block; margin: 3px 0 6px 2px; word-break: break-all; line-height: 1.4;">
+  💡 Provide a <code style="font-size: 0.60rem; padding: 1px 3px; background: var(--background-fill-secondary, #f3f4f6); border-radius: 3px;">.zip</code> e.g. <code>{ZIP_EXAMPLE}</code> or separate <code style="font-size: 0.60rem; padding: 1px 3px; background: var(--background-fill-secondary, #f3f4f6); border-radius: 3px;">.pth, .index</code> e.g. <code>{TEST_MODEL}</code>
+</span>
+"""
 RESOURCES = "- You can also try `RVC⚡ZERO` in Colab’s free tier, which provides free GPU [link](https://github.com/R3gm/rvc_zero_ui?tab=readme-ov-file#rvczero)."
 theme = args.theme
-delete_cache_time = (3200, 3200) if IS_ZERO_GPU else (86400, 86400)
+DELETE_CACHE_TIME = (3200, 3200) if IS_ZERO_GPU else (86400, 86400)
 
 PITCH_ALGO_OPT = [
     "pm",
@@ -77,6 +155,254 @@ PITCH_ALGO_OPT = [
     "rmvpe",
     "rmvpe+",
 ]
+
+hf_api = HfApi()
+
+def get_hf_likes(repo_id: str):
+    """Fetches and caches the repository like count using the official Hugging Face Hub API."""
+    if not repo_id or repo_id == "Community / Hugging Face":
+        return "N/A"
+
+    if repo_id in LIKES_CACHE:
+        return LIKES_CACHE[repo_id]
+
+    try:
+        info = hf_api.model_info(repo_id=repo_id, timeout=3)
+        likes_count = info.likes if info.likes is not None else 0
+        LIKES_CACHE[repo_id] = f"{likes_count:,}"
+        return LIKES_CACHE[repo_id]
+    except Exception:
+        return "N/A"
+
+
+def update_search_selection(selected_url):
+    if not selected_url:
+        return "", (
+            "<div style='padding: 12px 16px; border-radius: 8px; border: 1px dashed var(--border-color-primary, #d1d5db); "
+            "background: var(--background-fill-secondary, #f9fafb); color: var(--body-text-color-subdued, #6b7280); font-size: 0.9rem; text-align: center;'>"
+            "🔍 <em>No model selected yet. Search above and pick a model from the list.</em>"
+            "</div>"
+        )
+
+    model_name = "Unknown Model"
+    repo_name = "Community / Hugging Face"
+    repo_url = "https://huggingface.co"
+    direct_url = selected_url
+    repo_id = None
+
+    if voice_finder.conn:
+        try:
+            cursor = voice_finder.conn.cursor()
+            cursor.execute(
+                "SELECT FILENAME, MODEL_ID, PARSED_URL FROM files WHERE PARSED_URL = ? LIMIT 1",
+                (selected_url,)
+            )
+            row = cursor.fetchone()
+            if row:
+                model_name = row[0]
+                repo_id = row[1]
+                direct_url = row[2]
+                repo_name = repo_id
+                repo_url = f"https://huggingface.co/{repo_id}"
+        except Exception as e:
+            print(f"Error resolving model details from DB: {e}")
+
+    likes = get_hf_likes(repo_id) if repo_id else "N/A"
+
+    info_card = f"""
+<div style="padding: 14px 16px; border-radius: 10px; border: 1px solid var(--border-color-primary, #e5e7eb); background: var(--background-fill-secondary, #f8fafc); margin-top: 6px;">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+    <div style="font-weight: 700; font-size: 1rem; color: var(--body-text-color, #0f172a);">
+      📦 {model_name}
+    </div>
+    <div style="background: #fef3c7; color: #b45309; border: 1px solid #fde68a; font-size: 0.8rem; font-weight: 600; padding: 2px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 4px;">
+      ⭐ {likes} Likes
+    </div>
+  </div>
+  <div style="font-size: 0.86rem; line-height: 1.6; color: var(--body-text-color-subdued, #334155);">
+    <div><strong>🏛️ Repository:</strong> <a href="{repo_url}" target="_blank" style="color: #2563eb; text-decoration: underline; font-weight: 500;">{repo_name} ↗</a></div>
+    <div style="margin-top: 4px; word-break: break-all;"><strong>🔗 Direct URL:</strong> <code style="font-size: 0.8rem; background: var(--background-fill-primary, #ffffff); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border-color-primary, #e2e8f0);">{direct_url}</code></div>
+  </div>
+</div>
+"""
+    return direct_url, info_card
+
+
+class ModelVoiceFinder:
+    def __init__(
+        self,
+        database_url="https://raw.githubusercontent.com/R3gm/database_zip_files/main/archive/database.csv",
+        database_path="database.csv",
+    ):
+        self.database_url = database_url
+        self.database_path = database_path
+        self.conn = None
+        self._load_and_init()
+
+    def _clean_file_url(self, val):
+        if pd.isna(val):
+            return ""
+        if isinstance(val, list):
+            return ", ".join(map(str, val))
+        if isinstance(val, str) and val.strip().startswith("[") and val.strip().endswith("]"):
+            try:
+                parsed = ast.literal_eval(val)
+                if isinstance(parsed, list):
+                    return ", ".join(map(str, parsed))
+            except Exception:
+                return val
+        return str(val)
+
+    def _normalize(self, text: str) -> str:
+        if pd.isna(text):
+            return ""
+        text = str(text).lower()
+        text = ''.join(
+            c for c in unicodedata.normalize('NFD', text)
+            if unicodedata.category(c) != 'Mn'
+        )
+        return re.sub(r"[+()\-_/.]", " ", text)
+
+    def _load_and_init(self):
+        try:
+            if not os.path.exists(self.database_path):
+                print("Downloading community voices database...")
+                req = urllib.request.Request(self.database_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp, open(self.database_path, "wb") as f:
+                    shutil.copyfileobj(resp, f)
+
+            df = pd.read_csv(self.database_path)
+            df["FILENAME_NORM"] = df["FILENAME"].apply(self._normalize)
+            df["PARSED_URL"] = df["PARSED_URL"].apply(self._clean_file_url)
+            df = df.reset_index(drop=True)
+            df["orig_index"] = df.index
+
+            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
+            df.to_sql("files", self.conn, index=False, if_exists="replace")
+
+            # Create indices for instant search speed
+            cursor = self.conn.cursor()
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_filename_norm ON files(FILENAME_NORM)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_parsed_url ON files(PARSED_URL)")
+            self.conn.commit()
+
+            print("Community voices database preloaded and indexed successfully.")
+        except Exception as e:
+            print(f"Error initializing ModelVoiceFinder: {e}")
+
+    def search(self, query: str):
+        if not self.conn or not query or not query.strip():
+            return gr.update(choices=[], value=None), "", update_search_selection(None)[1]
+
+        keywords = self._normalize(query).split()
+        if not keywords:
+            return gr.update(choices=[], value=None), "", update_search_selection(None)[1]
+
+        # Sanitize tokens to prevent SQL breaking characters
+        safe_keywords = [re.sub(r"[^\w\s]", "", k) for k in keywords if k.strip()]
+        if not safe_keywords:
+            return gr.update(choices=[], value=None), "", update_search_selection(None)[1]
+
+        whole_conditions = " AND ".join([
+            f"(FILENAME_NORM LIKE '% {k} %' OR FILENAME_NORM LIKE '{k} %' OR FILENAME_NORM LIKE '% {k}' OR FILENAME_NORM = '{k}')"
+            for k in safe_keywords
+        ])
+        partial_conditions = " AND ".join([f"FILENAME_NORM LIKE '%{k}%'" for k in safe_keywords])
+
+        sql = f"""
+        SELECT FILENAME, PARSED_URL, MODEL_ID,
+               CASE WHEN {whole_conditions} THEN 1 ELSE 0 END AS whole_match
+        FROM files
+        WHERE {partial_conditions}
+        ORDER BY whole_match DESC, orig_index ASC
+        LIMIT 150;
+        """
+
+        try:
+            df_res = pd.read_sql(sql, self.conn)
+            if df_res.empty:
+                gr.Info("I searched everywhere, but found nothing matching that...")
+                empty_card = (
+                    "<div style='padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-color-primary, #e5e7eb); "
+                    "background: var(--background-fill-secondary, #f9fafb); color: #ef4444; font-size: 0.9rem; text-align: center;'>"
+                    "❌ <em>No voice models found matching your search.</em>"
+                    "</div>"
+                )
+                return gr.update(choices=[], value=None), "", empty_card
+
+            choices = []
+            for row in df_res.itertuples(index=False):
+                display_name = f"{row.FILENAME} (Repo: {row.MODEL_ID})"
+                choices.append((display_name, row.PARSED_URL))
+
+            first_match_url = choices[0][1] if choices else None
+            direct_url, info_card = update_search_selection(first_match_url)
+            return gr.update(choices=choices, value=first_match_url), direct_url, info_card
+        except Exception as e:
+            print(f"Search error: {e}")
+            return gr.update(choices=[], value=None), "", "*Search error occurred.*"
+
+
+voice_finder = ModelVoiceFinder()
+
+
+def check_model_safety(file_path: str):
+    """Statically checks model or archive integrity. Raises ValueError if unsafe."""
+    if not file_path or not os.path.exists(file_path):
+        print(f"Skip file: {file_path}")
+        return
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in (".pth", ".pt", ".bin", ".zip", ".pkl"):
+        try:
+            result = scan_file_path(file_path)
+            if result and result.infected_files > 0:
+                raise ValueError(
+                    f"Integrity check failed: '{os.path.basename(file_path)}' contains unsupported or unsafe structures."
+                )
+        except ValueError:
+            raise
+        except Exception as e:
+            print(f"Integrity check skipped for {file_path}: {e}")
+
+
+def get_file_hash(file_path: str) -> str:
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def get_url_hash(url_data):
+    if not url_data:
+        return None
+    if "," in url_data:
+        a_, b_ = url_data.split(",")
+        a_, b_ = a_.strip().replace("/blob/", "/resolve/"), b_.strip().replace("/blob/", "/resolve/")
+        url_string = f"{a_}_{b_}"
+    else:
+        url_string = url_data.strip().replace("/blob/", "/resolve/")
+    return hashlib.sha256(url_string.encode()).hexdigest()
+
+
+def cache_gradio_paths(processed_url, model_file, index_file):
+    if not processed_url or not model_file:
+        return
+        
+    url_hash = get_url_hash(processed_url)
+    
+    def extract_path(f):
+        if not f: return None
+        if isinstance(f, str): return f
+        if isinstance(f, dict): return f.get("name", "")
+        return getattr(f, "name", str(f))
+
+    m_path = extract_path(model_file)
+    i_path = extract_path(index_file)
+    
+    if m_path:
+        URL_CACHE[url_hash] = (m_path, i_path)
 
 
 async def get_voices_list(proxy=None):
@@ -120,9 +446,30 @@ def unzip_in_folder(my_zip, my_dir):
 
 
 def find_my_model(a_, b_):
-
     if a_ is None or a_.endswith(".pth"):
+        if a_ and a_.endswith(".pth"):
+            check_model_safety(a_)
         return a_, b_
+
+    input_hash = None
+    if a_ and os.path.exists(a_):
+        input_hash = get_file_hash(a_)
+        if b_ and os.path.exists(b_):
+            input_hash += "_" + get_file_hash(b_)
+
+    if input_hash and input_hash in MODEL_CACHE:
+        cached_model, cached_index = MODEL_CACHE[input_hash]
+        model_exists = cached_model and os.path.exists(cached_model)
+        index_exists = (cached_index is None) or os.path.exists(cached_index)
+
+        if model_exists and index_exists:
+            check_model_safety(cached_model)
+            gr.Info(f"Model: {os.path.basename(cached_model)}")
+            if cached_index:
+                gr.Info(f"Index: {os.path.basename(cached_index)}")
+            return cached_model, cached_index
+        else:
+            del MODEL_CACHE[input_hash]
 
     txt_files = []
     for base_file in [a_, b_]:
@@ -135,14 +482,14 @@ def find_my_model(a_, b_):
         with open(txt, 'r') as file:
             first_line = file.readline()
 
-        download_manager(
-            url=first_line.strip(),
-            path=directory,
-            extension="",
-        )
+        url_to_download = first_line.strip()
+        ensure_valid_file(url_to_download)
+
+        hf_download_file(url_to_download, directory)
 
     for f in find_files(directory):
         if f.endswith(".zip"):
+            check_model_safety(f)
             unzip_in_folder(f, directory)
 
     model = None
@@ -151,38 +498,111 @@ def find_my_model(a_, b_):
 
     for ff in end_files:
         if ff.endswith(".pth"):
-            model = os.path.join(directory, ff)
-            gr.Info(f"Model found: {ff}")
+            check_model_safety(ff)
+            model = ff
+            gr.Info(f"Model: {os.path.basename(ff)}")
         if ff.endswith(".index"):
-            index = os.path.join(directory, ff)
-            gr.Info(f"Index found: {ff}")
+            index = ff
+            gr.Info(f"Index: {os.path.basename(ff)}")
 
     if not model:
-        gr.Error(f"Model not found in: {end_files}")
+        gr.Error("No valid .pth model file found,")
 
     if not index:
-        gr.Warning("Index not found")
+        gr.Warning("Couldn't find an index file... We'll just have to proceed without it.")
+
+    if model and input_hash:
+        MODEL_CACHE[input_hash] = (model, index)
 
     return model, index
 
 
+def validate_url(url: str) -> str:
+    """Validate URL protocol and host."""
+    url = url.strip()
+    if not url:
+        raise ValueError("URL cannot be empty.")
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Invalid protocol '{parsed.scheme}'. Only HTTPS is allowed.")
+
+    hostname = (parsed.hostname or "").lower()
+    if not any(hostname == d or hostname.endswith("." + d) for d in ALLOWED_DOMAINS):
+        raise ValueError("Only Hugging Face links are allowed here.")
+
+    return url
+
+
+def get_supported_audio_video_extensions():
+    try:
+        subtitle_codecs = set()
+        decoders_res = subprocess.run(
+            ["ffmpeg", "-decoders"], capture_output=True, text=True, check=True
+        )
+        for line in decoders_res.stdout.splitlines():
+            line_str = line.strip()
+            if len(line_str) > 7 and line_str[0] in ("V", "A", "S"):
+                parts = line_str.split()
+                if len(parts) >= 2:
+                    media_type = line_str[0]
+                    codec_name = parts[1].lower()
+                    if media_type == "S":
+                        subtitle_codecs.add(codec_name)
+
+        demuxers_res = subprocess.run(
+            ["ffmpeg", "-demuxers"], capture_output=True, text=True, check=True
+        )
+        extensions = set()
+        for line in demuxers_res.stdout.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("D"):
+                parts = line_str.split(maxsplit=2)
+                if len(parts) >= 2:
+                    demux_names = parts[1].split(",")
+                    description = parts[2].lower() if len(parts) >= 3 else ""
+
+                    if any(
+                        sub_kw in description
+                        for sub_kw in ["subtitle", "caption", "teletext", "lyrics"]
+                    ):
+                        continue
+
+                    for ext in demux_names:
+                        clean_ext = ext.strip().lower()
+                        if clean_ext in subtitle_codecs:
+                            continue
+                        if clean_ext and clean_ext.isalnum():
+                            extensions.add(f".{clean_ext}")
+
+        return sorted(list(extensions))
+    except Exception as e:
+        print(f"Error querying ffmpeg: {e}")
+        return [".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".alac", ".caf", ".amr"]
+
+
 def ensure_valid_file(url):
-    if "huggingface" not in url:
-        raise ValueError("Only downloads from Hugging Face are allowed")
+    url = validate_url(url)
 
     try:
-        request = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(request) as response:
+        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=15) as response:
             content_length = response.headers.get("Content-Length")
 
         if content_length is None:
-            raise ValueError("No Content-Length header found")
+            raise ValueError("Unable to read file info from url. The link might be invalid or unreachable.")
 
         file_size = int(content_length)
+        # print("debug", url, file_size)
         if file_size > 900000000 and IS_ZERO_GPU:
-            raise ValueError("The file is too large. Max allowed is 900 MB.")
+            raise ValueError("That file is way too big. 900 MB is the absolute limit.")
 
         return file_size
+
+    except urllib.error.HTTPError as err:
+        raise ValueError(
+            f"HTTP Error {err.code} ({err.reason}): The file at the provided URL does not exist, is private, or has been deleted from Hugging Face. Please verify the link."
+        )
 
     except Exception as e:
         raise e
@@ -195,9 +615,19 @@ def clear_files(directory):
 
 
 def get_my_model(url_data, progress=gr.Progress(track_tqdm=True)):
-
     if not url_data:
-        return None, None
+        return None, None, None
+
+    url_hash = get_url_hash(url_data)
+    if url_hash in URL_CACHE:
+        cached_model, cached_index = URL_CACHE[url_hash]
+        if cached_model and os.path.exists(cached_model) and ((cached_index is None) or os.path.exists(cached_index)):
+            gr.Info(f"Model: {os.path.basename(cached_model)}")
+            if cached_index is not None:
+                gr.Info(f"Index: {os.path.basename(cached_index)}")
+            return cached_model, cached_index, url_data
+        else:
+            del URL_CACHE[url_hash]
 
     if "," in url_data:
         a_, b_ = url_data.split(",")
@@ -214,14 +644,11 @@ def get_my_model(url_data, progress=gr.Progress(track_tqdm=True)):
         valid_url = [a_] if not b_ else [a_, b_]
         for link in valid_url:
             ensure_valid_file(link)
-            download_manager(
-                url=link,
-                path=directory,
-                extension="",
-            )
+            hf_download_file(link, directory)
 
         for f in find_files(directory):
             if f.endswith(".zip"):
+                check_model_safety(f)
                 unzip_in_folder(f, directory)
 
         model = None
@@ -230,21 +657,22 @@ def get_my_model(url_data, progress=gr.Progress(track_tqdm=True)):
 
         for ff in end_files:
             if ff.endswith(".pth"):
+                check_model_safety(ff)
                 model = ff
-                gr.Info(f"Model found: {ff}")
+                gr.Info(f"Model: {os.path.basename(ff)}")
             if ff.endswith(".index"):
                 index = ff
-                gr.Info(f"Index found: {ff}")
+                gr.Info(f"Index: {os.path.basename(ff)}")
 
         if not model:
-            raise ValueError(f"Model not found in: {end_files}")
+            raise ValueError("No valid .pth model file found.")
 
         if not index:
-            gr.Warning("Index not found")
+            gr.Info("Couldn't find an index file... We'll just have to proceed without it.")
         else:
             index = os.path.abspath(index)
 
-        return os.path.abspath(model), index
+        return os.path.abspath(model), index, url_data
 
     except Exception as e:
         raise e
@@ -269,7 +697,7 @@ def add_audio_effects(audio_list, type_output):
                     HighpassFilter(),
                     Compressor(ratio=4, threshold_db=-15),
                     Reverb(room_size=0.10, dry_level=0.8, wet_level=0.2, damping=0.7)
-                 ]
+                ]
             )
 
             # Temporary WAV to hold processed data before exporting
@@ -337,17 +765,36 @@ def apply_noisereduce(audio_list, type_output):
 
 
 @spaces.GPU()
-def convert_now(audio_files, random_tag, converter, type_output, steps):
-    for step in range(steps):
-        audio_files = converter(
-            audio_files,
-            random_tag,
-            overwrite=False,
-            parallel_workers=(2 if IS_COLAB else 8),
-            type_output=type_output,
-        )
+def convert_now(audio_files, type_output, steps, params_tag):
+    global converter
 
-    return audio_files
+    try:
+        
+        random_tag = params_tag["tag"]
+        converter.apply_conf(**params_tag)
+        
+        for step in range(steps):
+            if step > 0:
+                conf = converter.model_config[random_tag]
+                conf["pitch_lvl"] = 0                              # Pitch is already at target
+                # conf["respiration_median_filtering"] = 0           # Avoid flattening natural vibrato
+                # conf["envelope_ratio"] = 1.0                       # Skip redundant RMS volume matching
+                conf["index_influence"] = round((conf["index_influence"] / 5), 2)  # Reduce artifact stacking
+                # conf["consonant_breath_protection"] = 0.5          # Avoid cutting consonants twice
+    
+            audio_files = converter(
+                audio_files,
+                random_tag,
+                overwrite=False,
+                parallel_workers=(2 if IS_COLAB else 8),
+                type_output=type_output,
+                show_progress=False,
+            )
+
+        return audio_files, None
+    except Exception as e:
+        traceback.print_exc()
+        return [], str(e)    
 
 
 def run(
@@ -366,7 +813,7 @@ def run(
     steps,
 ):
     if not audio_files:
-        raise ValueError("The audio pls")
+        raise gr.Error("You didn't provide any audio... How am I supposed to convert nothing?")
 
     if isinstance(audio_files, str):
         audio_files = [audio_files]
@@ -377,13 +824,21 @@ def run(
     except Exception as e:
         print(e)
 
-    if file_m is not None and file_m.endswith(".txt"):
+    if file_m is not None and (file_m.endswith(".txt") or file_m.endswith(".zip")):
         file_m, file_index = find_my_model(file_m, file_index)
-        print(file_m, file_index)
 
-    random_tag = "USER_"+str(random.randint(10000000, 99999999))
+    # 1. Verify files exist using template
+    files_to_check = [("Audio", f) for f in audio_files] + [("Model", file_m)]
+    if file_index:
+        files_to_check.append(("Index", file_index))
 
-    converter.apply_conf(
+    for label, path in files_to_check:
+        if not path or not os.path.exists(path):
+            raise gr.Error(f"The Space may have restarted or your {label.lower()} file was not completely uploaded... Just re-upload your {label.lower()}.")
+
+    random_tag = "USER_" + str(random.randint(10000000, 99999999))
+
+    params_tag = dict(
         tag=random_tag,
         file_model=file_m,
         pitch_algo=pitch_alg,
@@ -395,9 +850,14 @@ def run(
         consonant_breath_protection=c_b_p,
         resample_sr=0,
     )
-    time.sleep(0.1)
+    # time.sleep(0.1)
 
-    result = convert_now(audio_files, random_tag, converter, type_output, steps)
+    result, error_msg = convert_now(audio_files, type_output, steps, params_tag)
+
+    if error_msg is not None:
+        raise gr.Error(f"Error: {error_msg}")        
+    if not result:
+        raise gr.Error("Conversion failed due to an unexpected error. Please check your files and settings, then try again.")
 
     if active_noise_reduce:
         result = apply_noisereduce(result, type_output)
@@ -408,20 +868,52 @@ def run(
     return result
 
 
+def clear_player():
+    return None
+
+
+def load_first_audio(output_files, play_audio):
+    if not play_audio or not output_files:
+        return None
+    first_file = output_files[0]
+    if isinstance(first_file, dict):
+        first_file = first_file.get("name")
+    return first_file
+
+
+def mic_conf():
+    return gr.Audio(
+        sources=["microphone"],
+        type="filepath",
+        label="Record Audio",
+    )
+
+
 def audio_conf():
     return gr.File(
-        label="Audio files",
+        label="Target Audio File(s)",
         file_count="multiple",
         type="filepath",
         container=True,
+        file_types=supported_extensions,
     )
 
 
 def model_conf():
     return gr.File(
-        label="Model file",
+        label="Model File",
         type="filepath",
         height=130,
+        file_types=[".txt", ".pth", ".zip"],
+    )
+
+
+def index_conf():
+    return gr.File(
+        label="Index File",
+        type="filepath",
+        height=130,
+        file_types=[".index", ".txt"],
     )
 
 
@@ -430,7 +922,6 @@ def pitch_algo_conf():
         PITCH_ALGO_OPT,
         value=PITCH_ALGO_OPT[4],
         label="Pitch algorithm",
-        visible=True,
         interactive=True,
     )
 
@@ -442,16 +933,7 @@ def pitch_lvl_conf():
         maximum=24,
         step=1,
         value=0,
-        visible=True,
         interactive=True,
-    )
-
-
-def index_conf():
-    return gr.File(
-        label="Index file",
-        type="filepath",
-        height=130,
     )
 
 
@@ -461,6 +943,7 @@ def index_inf_conf():
         maximum=1,
         label="Index influence",
         value=0.75,
+        interactive=True,
     )
 
 
@@ -495,84 +978,11 @@ def consonant_protec_conf():
     )
 
 
-def button_conf():
-    return gr.Button(
-        "Inference",
-        variant="primary",
-    )
-
-
-def output_conf():
-    return gr.File(
-        label="Result",
-        file_count="multiple",
-        interactive=False,
-    )
-
-
-def active_tts_conf():
-    return gr.Checkbox(
-        False,
-        label="TTS",
-        # info="",
-        container=False,
-    )
-
-
-def tts_voice_conf():
-    return gr.Dropdown(
-        label="tts voice",
-        choices=voices,
-        visible=False,
-        value="en-US-EmmaMultilingualNeural-Female",
-    )
-
-
-def tts_text_conf():
-    return gr.Textbox(
-        value="",
-        placeholder="Write the text here...",
-        label="Text",
-        visible=False,
-        lines=3,
-    )
-
-
-def tts_button_conf():
-    return gr.Button(
-        "Process TTS",
-        variant="secondary",
-        visible=False,
-    )
-
-
-def tts_play_conf():
-    return gr.Checkbox(
-        False,
-        label="Play",
-        # info="",
-        container=False,
-        visible=False,
-    )
-
-
-def sound_gui():
-    return gr.Audio(
-        value=None,
-        type="filepath",
-        # format="mp3",
-        autoplay=True,
-        visible=True,
-        interactive=False,
-        elem_id="audio_tts",
-    )
-
-
 def steps_conf():
     return gr.Slider(
         minimum=1,
         maximum=3,
-        label="Steps",
+        label="Conversion Cycles",
         value=1,
         step=1,
         interactive=True,
@@ -584,15 +994,15 @@ def format_output_gui():
         label="Format output:",
         choices=["wav", "mp3", "flac"],
         value="wav",
+        interactive=True,
     )
+
 
 def denoise_conf():
     return gr.Checkbox(
         False,
         label="Denoise",
-        # info="",
         container=False,
-        visible=True,
     )
 
 
@@ -600,165 +1010,441 @@ def effects_conf():
     return gr.Checkbox(
         False,
         label="Reverb",
-        # info="",
         container=False,
-        visible=True,
     )
 
 
-def infer_tts_audio(tts_voice, tts_text, play_tts):
-    out_dir = "output"
-    folder_tts = "USER_"+str(random.randint(10000, 99999))
-
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(os.path.join(out_dir, folder_tts), exist_ok=True)
-    out_path = os.path.join(out_dir, folder_tts, "tts.mp3")
-
-    asyncio.run(edge_tts.Communicate(tts_text, "-".join(tts_voice.split('-')[:-1])).save(out_path))
-    if play_tts:
-        return [out_path], out_path
-    return [out_path], None
-
-
-def show_components_tts(value_active):
-    return gr.update(
-        visible=value_active
-    ), gr.update(
-        visible=value_active
-    ), gr.update(
-        visible=value_active
-    ), gr.update(
-        visible=value_active
-    )
-
-
-def down_active_conf():
+def player_conf():
     return gr.Checkbox(
         False,
-        label="URL-to-Model",
-        # info="",
+        label="Audio Player",
         container=False,
+    )
+
+
+def button_conf():
+    return gr.Button(
+        "🚀 Inference",
+        variant="primary",
+        size="lg",
+    )
+
+
+def output_conf():
+    return gr.File(
+        label="Result Audio",
+        file_count="multiple",
+        interactive=False,
+    )
+
+
+def tts_voice_conf():
+    return gr.Dropdown(
+        label="TTS Voice",
+        choices=voices,
+        value="en-US-EmmaMultilingualNeural-Female",
+        interactive=True,
+    )
+
+
+def tts_text_conf():
+    return gr.Textbox(
+        value="",
+        placeholder="Write the text here...",
+        label="Text",
+        lines=3,
+    )
+
+
+def tts_button_conf():
+    return gr.Button(
+        "Process TTS",
+        variant="secondary",
+    )
+
+
+def sound_gui():
+    return gr.Audio(
+        value=None,
+        type="filepath",
+        autoplay=True,
+        visible=False,
+        interactive=False,
+        label="Audio Preview",
     )
 
 
 def down_url_conf():
     return gr.Textbox(
         value="",
-        placeholder="Write the url here...",
-        label="Enter URL",
-        visible=False,
+        placeholder="Paste a Hugging Face link here...",
+        label="Model URL",
         lines=1,
     )
 
 
 def down_button_conf():
     return gr.Button(
-        "Process",
+        "⬇️ Download & Load Model",
         variant="secondary",
-        visible=False,
     )
 
 
-def show_components_down(value_active):
-    return gr.update(
-        visible=value_active
-    ), gr.update(
-        visible=value_active
-    ), gr.update(
-        visible=value_active
+def infer_tts_audio(tts_voice, tts_text, play_audio):
+    out_dir = "output"
+    folder_tts = "USER_" + str(random.randint(10000, 99999))
+
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(os.path.join(out_dir, folder_tts), exist_ok=True)
+    out_path = os.path.join(out_dir, folder_tts, "tts.mp3")
+
+    asyncio.run(edge_tts.Communicate(tts_text, "-".join(tts_voice.split('-')[:-1])).save(out_path))
+    player_audio = out_path if play_audio else None
+    return [out_path], player_audio
+
+
+def sync_mic_audio(mic_path):
+    if not mic_path:
+        return gr.update()
+    return [mic_path]
+
+
+def export_rvc_settings_json(
+    audio_tab,
+    model_tab,
+    tts_voice,
+    down_url,
+    algo,
+    algo_lvl,
+    indx_inf,
+    res_fc,
+    envel_r,
+    const,
+    steps,
+    format_out,
+    denoise,
+    effects,
+    player,
+):
+    settings_dict = {
+        "audio_tab": str(audio_tab) if audio_tab else "tab_audio_upload",
+        "model_tab": str(model_tab) if model_tab else "tab_model_upload",
+        "tts_voice": tts_voice,
+        "down_url": down_url,
+        "pitch_algo": algo,
+        "pitch_lvl": int(algo_lvl),
+        "index_influence": float(indx_inf),
+        "respiration_filter": int(res_fc),
+        "envelope_ratio": float(envel_r),
+        "consonant_protection": float(const),
+        "steps": int(steps),
+        "format_output": format_out,
+        "denoise": bool(denoise),
+        "effects": bool(effects),
+        "player": bool(player),
+    }
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, f"rvc_settings_{uuid.uuid4().hex[:8]}.json")
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(settings_dict, f, indent=4, ensure_ascii=False)
+    
+    return file_path
+
+
+def parse_rvc_settings_file(file_obj):
+    if not file_obj:
+        return [gr.update() for _ in range(17)]
+
+    file_path = file_obj.name if hasattr(file_obj, "name") else str(file_obj)
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        gr.Warning("I couldn't read that settings file... Make sure it's a valid JSON.")
+        return [gr.update() for _ in range(17)]
+
+    if not isinstance(data, dict):
+        gr.Warning("This settings file format is all wrong...")
+        return [gr.update() for _ in range(17)]
+
+    saved_algo = data.get("pitch_algo")
+    algo_val = saved_algo if saved_algo in PITCH_ALGO_OPT else gr.update()
+    saved_aud_tab = data.get("audio_tab", "tab_audio_upload")
+    saved_mod_tab = data.get("model_tab", "tab_model_upload")
+
+    gr.Info("Fine, your settings have been loaded.")
+    return (
+        gr.Tabs(selected=saved_aud_tab),
+        gr.Tabs(selected=saved_mod_tab),
+        saved_aud_tab,
+        saved_mod_tab,
+        data.get("tts_voice", gr.update()),
+        data.get("down_url", ""),
+        algo_val,
+        data.get("pitch_lvl", gr.update()),
+        data.get("index_influence", gr.update()),
+        data.get("respiration_filter", gr.update()),
+        data.get("envelope_ratio", gr.update()),
+        data.get("consonant_protection", gr.update()),
+        data.get("steps", gr.update()),
+        data.get("format_output", gr.update()),
+        data.get("denoise", gr.update()),
+        data.get("effects", gr.update()),
+        data.get("player", gr.update()),
     )
 
+
+# CSS rules to hide element visually while keeping DOM node accessible
 CSS = """
-#audio_tts {
-  visibility: hidden;   /* invisible but still takes space */
-  height: 0px;
-  width: 0px;
-  max-width: 0px;
-  max-height: 0px;
+#download_settings_json_hidden {
+    position: absolute !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    width: 0px !important;
+    height: 0px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    overflow: hidden !important;
 }
 """
 
+supported_extensions = get_supported_audio_video_extensions()
+print("Supported extensions found:", supported_extensions)
+
+
 def get_gui(theme):
-    with gr.Blocks(theme=theme, css=CSS, fill_width=True, fill_height=False, delete_cache=delete_cache_time) as app:
-        gr.Markdown(title)
-        gr.Markdown(description)
+    with gr.Blocks(theme=theme, fill_width=True, fill_height=False, delete_cache=DELETE_CACHE_TIME) as app:
+        gr.Markdown(TITLE)
+        gr.Markdown(DESCRIPTION)
 
-        active_tts = active_tts_conf()
+        processed_url_state = gr.State()
+        active_audio_tab = gr.State("tab_audio_upload")
+        active_model_tab = gr.State("tab_model_upload")
+
         with gr.Row():
+            # Left Column: Inputs & Models
             with gr.Column(scale=1):
-                tts_text = tts_text_conf()
-            with gr.Column(scale=2):
-                with gr.Row():
-                    with gr.Column():
+                with gr.Tabs(selected="tab_audio_upload") as audio_tabs:
+                    with gr.Tab("📁 Upload", id="tab_audio_upload") as tab_aud_up:
+                        gr.Markdown("Upload your audio files directly to the box below.")
+                    with gr.Tab("🗣️ TTS", id="tab_audio_tts") as tab_aud_tts:
+                        tts_text = tts_text_conf()
+                        tts_voice = tts_voice_conf()
+                        tts_button = tts_button_conf()
+                    with gr.Tab("🎙️ Record", id="tab_audio_rec") as tab_aud_rec:
+                        mic_aud = mic_conf()
+
+                aud = audio_conf()
+
+                with gr.Tabs(selected="tab_model_upload") as model_tabs:
+                    with gr.Tab("📁 Upload Model", id="tab_model_upload") as tab_mod_up:
+                        gr.Markdown("Upload the model and optional index files below.")
+                    with gr.Tab("🌐 Direct URL", id="tab_model_url") as tab_mod_url:
+                        gr.Markdown(INFO_EXAMPLES)
+                        down_url_gui = down_url_conf()
+                        down_button_gui = down_button_conf()
+                    with gr.Tab("🔍 Search Community", id="tab_model_search") as tab_mod_search:
                         with gr.Row():
-                            tts_voice = tts_voice_conf()
-                            tts_active_play = tts_play_conf()
+                            search_query = gr.Textbox(label="Search Query", placeholder="Character or model name...", scale=3, lines=1)
+                            search_btn = gr.Button("🔍 Search", variant="primary", scale=1)
+                        search_results = gr.Dropdown(label="Search Results", choices=[], interactive=True)
+                        model_info_md = gr.Markdown(value="*Select a model from the dropdown to view details.*")
+                        search_down_btn = gr.Button("⬇️ Download & Load Model", variant="secondary")
 
-                tts_button = tts_button_conf()
-                tts_play = sound_gui()
+                with gr.Row():
+                    model = model_conf()
+                    indx = index_conf()
 
-        active_tts.change(
-            fn=show_components_tts,
-            inputs=[active_tts],
-            outputs=[tts_voice, tts_text, tts_button, tts_active_play],
-        )
-
-        aud = audio_conf()
-        # gr.HTML("<hr>")
-
-        tts_button.click(
-            fn=infer_tts_audio,
-            inputs=[tts_voice, tts_text, tts_active_play],
-            outputs=[aud, tts_play],
-        )
-
-        down_active_gui = down_active_conf()
-        down_info = gr.Markdown(
-            f"Provide a link to a zip file, like this one: `https://huggingface.co/MrDawg/ToothBrushing/resolve/main/ToothBrushing.zip?download=true`, or separate links with a comma for the .pth and .index files, like this: `{test_model}`",
-            visible=False
-        )
-        with gr.Row():
-            with gr.Column(scale=3):
-                down_url_gui = down_url_conf()
+            # Right Column: Settings, Actions & Outputs
             with gr.Column(scale=1):
-                down_button_gui = down_button_conf()
+                with gr.Accordion(label="Advanced settings", open=False):
+                    with gr.Row():
+                        load_settings_btn = gr.UploadButton(
+                            "📂 Load Settings (JSON)",
+                            file_types=[".json"],
+                            file_count="single",
+                            size="sm",
+                        )
+                        download_json_btn = gr.Button(
+                            "💾 Save Settings JSON",
+                            size="sm",
+                        )
+                        # Keep DOM node alive and hide with CSS
+                        download_json_hidden = gr.DownloadButton(
+                            visible=True,
+                            elem_id="download_settings_json_hidden",
+                        )
 
-        with gr.Column():
-            with gr.Row():
-                model = model_conf()
-                indx = index_conf()
+                    with gr.Row():
+                        algo = pitch_algo_conf()
+                        algo_lvl = pitch_lvl_conf()
 
-        down_active_gui.change(
-            show_components_down,
-            [down_active_gui],
-            [down_info, down_url_gui, down_button_gui]
-        )
+                    with gr.Row():
+                        indx_inf = index_inf_conf()
+                        steps_gui = steps_conf()
 
-        down_button_gui.click(
-            get_my_model,
-            [down_url_gui],
-            [model, indx]
-        )
+                    with gr.Row():
+                        res_fc = respiration_filter_conf()
+                        envel_r = envelope_ratio_conf()
 
-        with gr.Accordion(label="Advanced settings", open=False):
-            algo = pitch_algo_conf()
-            algo_lvl = pitch_lvl_conf()
-            indx_inf = index_inf_conf()
-            res_fc = respiration_filter_conf()
-            envel_r = envelope_ratio_conf()
-            const = consonant_protec_conf()
-            steps_gui = steps_conf()
-            format_out = format_output_gui()
-            with gr.Row():
-                with gr.Column():
+                    with gr.Row():
+                        const = consonant_protec_conf()
+                        format_out = format_output_gui()
+
                     with gr.Row():
                         denoise_gui = denoise_conf()
                         effects_gui = effects_conf()
-        button_base = button_conf()
-        output_base = output_conf()
+
+                button_base = button_conf()
+
+                with gr.Row():
+                    gr.Markdown("### 🎧 Result Audio")
+                    player_gui = player_conf()
+
+                player_audio = sound_gui()
+                output_base = output_conf()
+
+        # Tab Selection Tracking
+        tab_aud_up.select(lambda: "tab_audio_upload", outputs=[active_audio_tab], api_visibility="private")
+        tab_aud_tts.select(lambda: "tab_audio_tts", outputs=[active_audio_tab], api_visibility="private")
+        tab_aud_rec.select(lambda: "tab_audio_rec", outputs=[active_audio_tab], api_visibility="private")
+
+        tab_mod_up.select(lambda: "tab_model_upload", outputs=[active_model_tab], api_visibility="private")
+        tab_mod_url.select(lambda: "tab_model_url", outputs=[active_model_tab], api_visibility="private")
+        tab_mod_search.select(lambda: "tab_model_search", outputs=[active_model_tab], api_visibility="private")
+
+        # Events Wiring
+        mic_aud.change(
+            fn=sync_mic_audio,
+            inputs=[mic_aud],
+            outputs=[aud],
+            api_visibility="private",
+        )
+
+        tts_button.click(
+            fn=infer_tts_audio,
+            inputs=[tts_voice, tts_text, player_gui],
+            outputs=[aud, player_audio],
+            api_visibility="private",
+        )
+
+        player_gui.change(
+            fn=lambda val: gr.update(visible=val),
+            inputs=[player_gui],
+            outputs=[player_audio],
+            api_visibility="private",
+        )
+
+        search_btn.click(
+            fn=voice_finder.search,
+            inputs=[search_query],
+            outputs=[search_results, down_url_gui, model_info_md],
+            api_visibility="private",
+        )
+        search_query.submit(
+            fn=voice_finder.search,
+            inputs=[search_query],
+            outputs=[search_results, down_url_gui, model_info_md],
+            api_visibility="private",
+        )
+
+        search_results.select(
+            fn=update_search_selection,
+            inputs=[search_results],
+            outputs=[down_url_gui, model_info_md],
+            api_visibility="private",
+        )
+
+        down_button_gui.click(
+            fn=get_my_model,
+            inputs=[down_url_gui],
+            outputs=[model, indx, processed_url_state],
+            api_visibility="private",
+        ).success(
+            fn=cache_gradio_paths,
+            inputs=[processed_url_state, model, indx],
+            outputs=[],
+            api_visibility="private",
+        )
+
+        search_down_btn.click(
+            fn=get_my_model,
+            inputs=[down_url_gui],
+            outputs=[model, indx, processed_url_state],
+            api_visibility="private",
+        ).success(
+            fn=cache_gradio_paths,
+            inputs=[processed_url_state, model, indx],
+            outputs=[],
+            api_visibility="private",
+        )
+
+        download_json_btn.click(
+            fn=export_rvc_settings_json,
+            inputs=[
+                active_audio_tab,
+                active_model_tab,
+                tts_voice,
+                down_url_gui,
+                algo,
+                algo_lvl,
+                indx_inf,
+                res_fc,
+                envel_r,
+                const,
+                steps_gui,
+                format_out,
+                denoise_gui,
+                effects_gui,
+                player_gui,
+            ],
+            outputs=[download_json_hidden],
+            api_visibility="private",
+        ).then(
+            fn=None,
+            inputs=None,
+            outputs=None,
+            js="() => { const el = document.querySelector('#download_settings_json_hidden button') || document.querySelector('#download_settings_json_hidden a') || document.querySelector('#download_settings_json_hidden'); if (el) el.click(); }",
+        )
+
+        load_settings_btn.upload(
+            fn=parse_rvc_settings_file,
+            inputs=[load_settings_btn],
+            outputs=[
+                audio_tabs,
+                model_tabs,
+                active_audio_tab,
+                active_model_tab,
+                tts_voice,
+                down_url_gui,
+                algo,
+                algo_lvl,
+                indx_inf,
+                res_fc,
+                envel_r,
+                const,
+                steps_gui,
+                format_out,
+                denoise_gui,
+                effects_gui,
+                player_gui,
+            ],
+            api_visibility="private",
+        ).then(
+            fn=get_my_model,
+            inputs=[down_url_gui],
+            outputs=[model, indx, processed_url_state],
+            api_visibility="private",
+        ).success(
+            fn=cache_gradio_paths,
+            inputs=[processed_url_state, model, indx],
+            outputs=[],
+            api_visibility="private",
+        )
 
         button_base.click(
-            run,
+            fn=run,
             inputs=[
                 aud,
                 model,
@@ -775,6 +1461,17 @@ def get_gui(theme):
                 steps_gui,
             ],
             outputs=[output_base],
+        ).success(
+            fn=clear_player,
+            inputs=None,
+            outputs=[player_audio],
+            queue=False,
+            api_visibility="private",
+        ).success(
+            fn=load_first_audio,
+            inputs=[output_base, player_gui],
+            outputs=[player_audio],
+            api_visibility="private",
         )
 
         gr.Examples(
@@ -812,7 +1509,6 @@ def get_gui(theme):
                     0.25,
                     0.50,
                 ],
-
             ],
             fn=run,
             inputs=[
@@ -835,12 +1531,16 @@ def get_gui(theme):
 
 
 if __name__ == "__main__":
-    tts_voice_list = asyncio.new_event_loop().run_until_complete(get_voices_list(proxy=None))
-    voices = sorted([
-        (" - ".join(reversed(v["FriendlyName"].split("-"))).replace("Microsoft ", "").replace("Online (Natural)", f"({v['Gender']})").strip(), f"{v['ShortName']}-{v['Gender']}")
-        for v in tts_voice_list
-    ])
-
+    try:
+        tts_voice_list = asyncio.new_event_loop().run_until_complete(get_voices_list(proxy=None))
+        voices = sorted([
+            (" - ".join(reversed(v["FriendlyName"].split("-"))).replace("Microsoft ", "").replace("Online (Natural)", f"({v['Gender']})").strip(), f"{v['ShortName']}-{v['Gender']}")
+            for v in tts_voice_list
+        ])
+    except Exception as e:
+        print(f"Warning: Could not retrieve online voices ({e}). Using default preset.")
+        voices = [("English (United States) - EmmaMultilingual (Female)", "en-US-EmmaMultilingualNeural-Female")]
+    
     app = get_gui(theme)
 
     app.queue(default_concurrency_limit=40)
@@ -852,4 +1552,5 @@ if __name__ == "__main__":
         quiet=False,
         debug=IS_COLAB,
         ssr_mode=False,
+        css=CSS,
     )
