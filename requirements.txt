@@ -1,11 +1,14 @@
-torch==2.5.1
+torch==2.9.1
+torchvision==0.24.1
+torchaudio==2.9.1
 infer_rvc_python
 edge_tts==7.2.7
 pedalboard
 noisereduce
 numpy<3
-transformers<=4.57.6
+transformers==5.16.1
 # pydantic==2.10.6
-gradio==5.43.1
-spaces
+gradio==6.26.0
+spaces==0.51.3
 matplotlib-inline
+picklescan
