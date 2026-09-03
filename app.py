@@ -690,7 +690,7 @@ def get_my_model(url_data, progress=gr.Progress(track_tqdm=True)):
 
 
 def add_audio_effects(audio_list, type_output):
-    print("Audio effects")
+    # print("Audio effects")
 
     result = []
     for audio_path in audio_list:
@@ -734,7 +734,7 @@ def add_audio_effects(audio_list, type_output):
 
 def apply_noisereduce(audio_list, type_output):
     # https://github.com/sa-if/Audio-Denoiser
-    print("Noice reduce")
+    # print("Noice reduce")
 
     result = []
     for audio_path in audio_list:
